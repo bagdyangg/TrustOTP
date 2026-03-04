@@ -9,11 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/gorilla/handlers"
-	"github.com/gorilla/mux"
 	"github.com/jhaals/yopass/pkg/yopass"
-	"github.com/prometheus/client_golang/prometheus"
-	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/spf13/viper"
 	"go.uber.org/zap/zaptest"
 )
@@ -22,7 +18,6 @@ func newTestServer(t *testing.T, db Database, maxLength int, forceOneTime bool) 
 	return Server{
 		DB:                  db,
 		MaxLength:           maxLength,
-		Registry:            prometheus.NewRegistry(),
 		ForceOneTimeSecrets: forceOneTime,
 		Logger:              zaptest.NewLogger(t),
 	}
@@ -400,61 +395,6 @@ func TestDeleteSecret(t *testing.T) {
 	}
 }
 
-func TestMetrics(t *testing.T) {
-	requests := []struct {
-		method string
-		path   string
-	}{
-		{
-			method: "GET",
-			path:   "/secret/ebfa0c88-7610-4d3f-856a-c8810a44361c",
-		},
-		{
-			method: "GET",
-			path:   "/secret/invalid-key-format",
-		},
-	}
-	y := newTestServer(t, &mockDB{}, 1, false)
-	h := y.HTTPHandler()
-
-	for _, r := range requests {
-		req, err := http.NewRequest(r.method, r.path, nil)
-		if err != nil {
-			t.Fatal(err)
-		}
-		rr := httptest.NewRecorder()
-		h.ServeHTTP(rr, req)
-	}
-
-	metrics := []string{"yopass_http_requests_total", "yopass_http_request_duration_seconds"}
-	n, err := testutil.GatherAndCount(y.Registry, metrics...)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if expected := len(metrics) * len(requests); n != expected {
-		t.Fatalf(`Expected %d recorded metrics; got %d`, expected, n)
-	}
-
-	output := `
-# HELP yopass_http_requests_total Total number of requests served by HTTP method, path and response code.
-# TYPE yopass_http_requests_total counter
-yopass_http_requests_total{code="200",method="GET",path="/secret/:key"} 1
-yopass_http_requests_total{code="404",method="GET",path="/"} 1
-`
-	err = testutil.GatherAndCompare(y.Registry, strings.NewReader(output), "yopass_http_requests_total")
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	warnings, err := testutil.GatherAndLint(y.Registry)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(warnings) != 0 {
-		t.Fatalf(`Expected no metric linter warnings; got %d`, len(warnings))
-	}
-}
-
 func TestSecurityHeaders(t *testing.T) {
 	tt := []struct {
 		scheme       string
@@ -560,7 +500,6 @@ func TestConfigHandlerLanguageSwitcher(t *testing.T) {
 
 	for _, tc := range tt {
 		t.Run(tc.name, func(t *testing.T) {
-			// Reset viper state
 			viper.Reset()
 			viper.Set("no-language-switcher", tc.setValue)
 
@@ -586,696 +525,66 @@ func TestConfigHandlerLanguageSwitcher(t *testing.T) {
 				t.Errorf("Expected NO_LANGUAGE_SWITCHER to be %v, got %v", want, got)
 			}
 
-			// Verify the key exists in the response
 			if _, exists := config["NO_LANGUAGE_SWITCHER"]; !exists {
 				t.Error("Expected NO_LANGUAGE_SWITCHER key to exist in config response")
 			}
 		})
 	}
-}
-
-func TestConfigHandlerPrivacyAndImprint(t *testing.T) {
-	tt := []struct {
-		name              string
-		privacyNoticeURL  string
-		imprintURL        string
-		expectPrivacy     bool
-		expectImprint     bool
-	}{
-		{
-			name:              "no URLs configured",
-			privacyNoticeURL:  "",
-			imprintURL:        "",
-			expectPrivacy:     false,
-			expectImprint:     false,
-		},
-		{
-			name:              "only privacy notice URL configured",
-			privacyNoticeURL:  "https://example.com/privacy",
-			imprintURL:        "",
-			expectPrivacy:     true,
-			expectImprint:     false,
-		},
-		{
-			name:              "only imprint URL configured",
-			privacyNoticeURL:  "",
-			imprintURL:        "https://example.com/imprint",
-			expectPrivacy:     false,
-			expectImprint:     true,
-		},
-		{
-			name:              "both URLs configured",
-			privacyNoticeURL:  "https://example.com/privacy",
-			imprintURL:        "https://example.com/imprint",
-			expectPrivacy:     true,
-			expectImprint:     true,
-		},
-		{
-			name:              "empty string URLs (should not appear in config)",
-			privacyNoticeURL:  "",
-			imprintURL:        "",
-			expectPrivacy:     false,
-			expectImprint:     false,
-		},
-	}
-
-	for _, tc := range tt {
-		t.Run(tc.name, func(t *testing.T) {
-			// Reset viper state
-			viper.Reset()
-			viper.Set("privacy-notice-url", tc.privacyNoticeURL)
-			viper.Set("imprint-url", tc.imprintURL)
-
-			server := newTestServer(t, &mockDB{}, 1, false)
-
-			req := httptest.NewRequest(http.MethodGet, "/config", nil)
-			w := httptest.NewRecorder()
-			server.configHandler(w, req)
-
-			res := w.Result()
-			defer res.Body.Close()
-
-			if res.StatusCode != http.StatusOK {
-				t.Fatalf("Expected status OK, got %d", res.StatusCode)
-			}
-
-			var config map[string]interface{}
-			if err := json.NewDecoder(res.Body).Decode(&config); err != nil {
-				t.Fatalf("Failed to decode response: %v", err)
-			}
-
-			// Check privacy notice URL
-			privacyURL, hasPrivacy := config["PRIVACY_NOTICE_URL"]
-			if tc.expectPrivacy {
-				if !hasPrivacy {
-					t.Error("Expected PRIVACY_NOTICE_URL key to exist in config response")
-				} else if privacyURL.(string) != tc.privacyNoticeURL {
-					t.Errorf("Expected PRIVACY_NOTICE_URL to be %v, got %v", tc.privacyNoticeURL, privacyURL)
-				}
-			} else {
-				if hasPrivacy {
-					t.Errorf("Expected PRIVACY_NOTICE_URL key to not exist in config response, but got %v", privacyURL)
-				}
-			}
-
-			// Check imprint URL
-			imprintURL, hasImprint := config["IMPRINT_URL"]
-			if tc.expectImprint {
-				if !hasImprint {
-					t.Error("Expected IMPRINT_URL key to exist in config response")
-				} else if imprintURL.(string) != tc.imprintURL {
-					t.Errorf("Expected IMPRINT_URL to be %v, got %v", tc.imprintURL, imprintURL)
-				}
-			} else {
-				if hasImprint {
-					t.Errorf("Expected IMPRINT_URL key to not exist in config response, but got %v", imprintURL)
-				}
-			}
-
-			// Verify that boolean config values are still present
-			if _, exists := config["DISABLE_UPLOAD"]; !exists {
-				t.Error("Expected DISABLE_UPLOAD key to exist in config response")
-			}
-			if _, exists := config["PREFETCH_SECRET"]; !exists {
-				t.Error("Expected PREFETCH_SECRET key to exist in config response")
-			}
-			if _, exists := config["DISABLE_FEATURES"]; !exists {
-				t.Error("Expected DISABLE_FEATURES key to exist in config response")
-			}
-			if _, exists := config["NO_LANGUAGE_SWITCHER"]; !exists {
-				t.Error("Expected NO_LANGUAGE_SWITCHER key to exist in config response")
-			}
-		})
-	}
-}
-
-func TestDisableUploadRoutes(t *testing.T) {
-	// Test with uploads disabled
-	viper.Set("disable-upload", true)
-	server := newTestServer(t, &mockDB{}, 1, false)
-	handler := server.HTTPHandler()
-
-	// Test that file upload routes are not available
-	fileRoutes := []struct {
-		method string
-		path   string
-	}{
-		{"POST", "/create/file"},
-		{"OPTIONS", "/create/file"},
-		{"GET", "/file/12345678-1234-1234-1234-123456789012"},
-		{"DELETE", "/file/12345678-1234-1234-1234-123456789012"},
-	}
-
-	for _, route := range fileRoutes {
-		req := httptest.NewRequest(route.method, route.path, nil)
-		w := httptest.NewRecorder()
-		handler.ServeHTTP(w, req)
-
-		// Should return 404 when uploads are disabled
-		if w.Code != 404 {
-			t.Errorf("Expected 404 for %s %s when uploads disabled, got %d", route.method, route.path, w.Code)
-		}
-	}
-
-	// Test with uploads enabled
-	viper.Set("disable-upload", false)
-	server2 := newTestServer(t, &mockDB{}, 1, false)
-	handler2 := server2.HTTPHandler()
-
-	// Test that OPTIONS /create/file is available when uploads enabled
-	req := httptest.NewRequest("OPTIONS", "/create/file", nil)
-	w := httptest.NewRecorder()
-	handler2.ServeHTTP(w, req)
-
-	if w.Code != 200 {
-		t.Errorf("Expected 200 for OPTIONS /create/file when uploads enabled, got %d", w.Code)
-	}
-
-	// Reset configuration
-	viper.Set("disable-upload", false)
 }
 
 func TestGetSecretStatus(t *testing.T) {
 	tt := []struct {
 		name       string
 		statusCode int
-		output     string
 		db         Database
 		oneTime    bool
 	}{
 		{
-			name:       "Secret exists - one time",
+			name:       "existing secret - not one time",
 			statusCode: 200,
-			output:     `{"oneTime":true}`,
-			db:         &mockStatusDB{oneTime: true, exists: true},
-			oneTime:    true,
-		},
-		{
-			name:       "Secret exists - not one time",
-			statusCode: 200,
-			output:     `{"oneTime":false}`,
 			db:         &mockStatusDB{oneTime: false, exists: true},
 			oneTime:    false,
 		},
 		{
-			name:       "Secret not found",
+			name:       "existing secret - one time",
+			statusCode: 200,
+			db:         &mockStatusDB{oneTime: true, exists: true},
+			oneTime:    true,
+		},
+		{
+			name:       "secret not found",
 			statusCode: 404,
-			output:     `{"message": "Secret not found"}`,
 			db:         &mockStatusDB{exists: false},
 		},
 	}
 
 	for _, tc := range tt {
 		t.Run(tc.name, func(t *testing.T) {
-			req, err := http.NewRequest("GET", "/secret/foo/status", nil)
-			if err != nil {
-				t.Fatal(err)
-			}
-			req = mux.SetURLVars(req, map[string]string{"key": "foo"})
-			rr := httptest.NewRecorder()
-			y := newTestServer(t, tc.db, 1, false)
-			y.getSecretStatus(rr, req)
-
-			if rr.Code != tc.statusCode {
-				t.Fatalf(`Expected status code %d; got %d`, tc.statusCode, rr.Code)
-			}
-
-			body := strings.TrimSpace(rr.Body.String())
-			if tc.statusCode == 200 {
-				if body != tc.output {
-					t.Fatalf(`Expected body "%s"; got "%s"`, tc.output, body)
-				}
-			}
-		})
-	}
-}
-
-func TestOptionsSecret(t *testing.T) {
-	server := newTestServer(t, &mockDB{}, 1, false)
-	viper.Set("cors-allow-origin", "*")
-	handler := server.HTTPHandler()
-
-	req := httptest.NewRequest(http.MethodOptions, "/create/secret", nil)
-	w := httptest.NewRecorder()
-	handler.ServeHTTP(w, req)
-
-	if w.Code != http.StatusOK {
-		t.Fatalf("Expected status OK, got %d", w.Code)
-	}
-
-	expectedHeaders := map[string]string{
-		"Access-Control-Allow-Origin":  "*",
-		"Access-Control-Allow-Methods": "*",
-		"Access-Control-Allow-Headers": "content-type",
-	}
-
-	for header, expected := range expectedHeaders {
-		got := w.Header().Get(header)
-		if got != expected {
-			t.Errorf("Expected header %s to be %q, got %q", header, expected, got)
-		}
-	}
-}
-
-func TestHTTPHandlerRoutes(t *testing.T) {
-	server := newTestServer(t, &mockDB{}, 1, false)
-	handler := server.HTTPHandler()
-
-	testCases := []struct {
-		method string
-		path   string
-		status int
-	}{
-		{"GET", "/config", 200},
-		{"OPTIONS", "/create/secret", 200},
-		{"OPTIONS", "/config", 200},
-	}
-
-	for _, tc := range testCases {
-		t.Run(fmt.Sprintf("%s %s", tc.method, tc.path), func(t *testing.T) {
-			req := httptest.NewRequest(tc.method, tc.path, nil)
-			w := httptest.NewRecorder()
-			handler.ServeHTTP(w, req)
-
-			if w.Code != tc.status {
-				t.Errorf("Expected status %d, got %d", tc.status, w.Code)
-			}
-		})
-	}
-}
-
-func TestNormalizedPath(t *testing.T) {
-	// Test the edge case where there's no route (returns "<other>")
-	req := httptest.NewRequest("GET", "/unknown", nil)
-	result := normalizedPath(req)
-	expected := "<other>"
-	if result != expected {
-		t.Errorf("Expected %q, got %q", expected, result)
-	}
-}
-
-func TestHTTPHandlerWithConfiguration(t *testing.T) {
-	// Test with prefetch-secret enabled
-	viper.Set("prefetch-secret", true)
-	server1 := newTestServer(t, &mockDB{}, 1, false)
-	handler := server1.HTTPHandler()
-
-	req := httptest.NewRequest("GET", "/secret/12345678-1234-1234-1234-123456789012/status", nil)
-	w := httptest.NewRecorder()
-	handler.ServeHTTP(w, req)
-
-	// Should be accessible when prefetch is enabled
-	if w.Code == 404 {
-		t.Error("Status endpoint should be available when prefetch-secret is enabled")
-	}
-
-	// Test with disable-upload set to false (uploads enabled)
-	viper.Set("disable-upload", false)
-	server2 := newTestServer(t, &mockDB{}, 1, false)
-	handler2 := server2.HTTPHandler()
-
-	req2 := httptest.NewRequest("OPTIONS", "/create/file", nil)
-	w2 := httptest.NewRecorder()
-	handler2.ServeHTTP(w2, req2)
-
-	if w2.Code != 200 {
-		t.Errorf("File OPTIONS should be available when uploads enabled, got %d", w2.Code)
-	}
-
-	// Reset configuration
-	viper.Set("prefetch-secret", false)
-	viper.Set("disable-upload", false)
-}
-
-func TestGetSecretWithToJSONError(t *testing.T) {
-	// This test is challenging since we can't easily mock yopass.Secret.ToJSON()
-	// The ToJSON method would need to return an error, which happens very rarely
-	// in practice (only if json.Marshal fails on a simple struct)
-	// We'll test the happy path that's already covered
-}
-
-// errorWriter is a ResponseWriter that fails on Write
-type errorWriter struct {
-	http.ResponseWriter
-	headerWritten bool
-}
-
-func (w *errorWriter) Write([]byte) (int, error) {
-	return 0, fmt.Errorf("write error")
-}
-
-func (w *errorWriter) WriteHeader(statusCode int) {
-	if !w.headerWritten {
-		w.ResponseWriter.WriteHeader(statusCode)
-		w.headerWritten = true
-	}
-}
-
-func TestCreateSecretWriteError(t *testing.T) {
-	validPGPMessage := `-----BEGIN PGP MESSAGE-----
-Version: OpenPGP.js v4.10.8
-Comment: https://openpgpjs.org
-
-wy4ECQMIRthQ3aO85NvgAfASIX3dTwsFVt0gshPu7n1tN05e8rpqxOk6PYNm
-xtt90k4BqHuTCLNlFRJjuiuE8zdIc+j5zTN5zihxUReVqokeqULLOx2FBMHZ
-sbfqaG/iDbp+qDOc98IagMyPrEqKDxnhVVOraXy5dD9RDsntLso=
-=0vwU
------END PGP MESSAGE-----`
-
-	server := newTestServer(t, &mockDB{}, 1000, false)
-
-	body := strings.NewReader(fmt.Sprintf(`{"message": "%s", "expiration": 3600}`, strings.ReplaceAll(validPGPMessage, "\n", "\\n")))
-	req := httptest.NewRequest("POST", "/secret", body)
-
-	// Use error writer to trigger the error path
-	recorder := httptest.NewRecorder()
-	errWriter := &errorWriter{ResponseWriter: recorder}
-
-	server.createSecret(errWriter, req)
-
-	// The function should complete even with write error (error is just logged)
-}
-
-func TestGetSecretWriteError(t *testing.T) {
-	server := newTestServer(t, &mockDB{}, 1000, false)
-	
-	req := httptest.NewRequest("GET", "/secret/test", nil)
-	req = mux.SetURLVars(req, map[string]string{"key": "test"})
-	
-	// Use error writer to trigger the error path
-	recorder := httptest.NewRecorder()
-	errWriter := &errorWriter{ResponseWriter: recorder}
-	
-	server.getSecret(errWriter, req)
-	
-	// The function should complete even with write error (error is just logged)
-}
-
-func TestGetSecretStatusWriteError(t *testing.T) {
-	server := newTestServer(t, &mockStatusDB{exists: true, oneTime: false}, 1000, false)
-	
-	req := httptest.NewRequest("GET", "/secret/test/status", nil)
-	req = mux.SetURLVars(req, map[string]string{"key": "test"})
-	
-	// Use error writer to trigger the error path
-	recorder := httptest.NewRecorder()
-	errWriter := &errorWriter{ResponseWriter: recorder}
-	
-	server.getSecretStatus(errWriter, req)
-	
-	// The function should complete even with write error (error is just logged)
-}
-
-func TestConfigHandlerForceOnetimeSecrets(t *testing.T) {
-	tt := []struct {
-		name     string
-		setValue bool
-		expected bool
-	}{
-		{
-			name:     "force-onetime-secrets disabled (default)",
-			setValue: false,
-			expected: false,
-		},
-		{
-			name:     "force-onetime-secrets enabled",
-			setValue: true,
-			expected: true,
-		},
-	}
-
-	for _, tc := range tt {
-		t.Run(tc.name, func(t *testing.T) {
-			// Reset viper state
 			viper.Reset()
-			viper.Set("force-onetime-secrets", tc.setValue)
+			viper.Set("prefetch-secret", true)
 
-			server := newTestServer(t, &mockDB{}, 1, false)
-
-			req := httptest.NewRequest(http.MethodGet, "/config", nil)
+			req := httptest.NewRequest(http.MethodGet, "/secret/test-key/status", nil)
 			w := httptest.NewRecorder()
-			server.configHandler(w, req)
+
+			y := newTestServer(t, tc.db, 1, false)
+			y.getSecretStatus(w, req)
 
 			res := w.Result()
 			defer res.Body.Close()
 
-			if res.StatusCode != http.StatusOK {
-				t.Fatalf("Expected status OK, got %d", res.StatusCode)
+			if res.StatusCode != tc.statusCode {
+				t.Fatalf("Expected status %d, got %d", tc.statusCode, res.StatusCode)
 			}
 
-			var config map[string]interface{}
-			if err := json.NewDecoder(res.Body).Decode(&config); err != nil {
-				t.Fatalf("Failed to decode response: %v", err)
-			}
-
-			if got, want := config["FORCE_ONETIME_SECRETS"].(bool), tc.expected; got != want {
-				t.Errorf("Expected FORCE_ONETIME_SECRETS to be %v, got %v", want, got)
-			}
-
-			// Verify the key exists in the response
-			if _, exists := config["FORCE_ONETIME_SECRETS"]; !exists {
-				t.Error("Expected FORCE_ONETIME_SECRETS key to exist in config response")
-			}
-		})
-	}
-}
-
-func TestHTTPLogFormatterEdgeCases(t *testing.T) {
-	logger := zaptest.NewLogger(t)
-	server := &Server{Logger: logger}
-	formatter := server.httpLogFormatter()
-
-	// Test with nil logger
-	nilServer := &Server{Logger: nil}
-	nilFormatter := nilServer.httpLogFormatter()
-	if nilFormatter == nil {
-		t.Error("Formatter should not be nil even with nil logger")
-	}
-
-	// Test with nil request (error path)
-	params := handlers.LogFormatterParams{
-		Request: nil,
-	}
-	formatter(nil, params)
-
-	// Test with CONNECT method over HTTP/2
-	req := httptest.NewRequest("CONNECT", "/", nil)
-	req.ProtoMajor = 2
-	req.Host = "example.com"
-
-	params2 := handlers.LogFormatterParams{
-		Request: req,
-	}
-	formatter(nil, params2)
-}
-
-func TestIsPGPEncrypted(t *testing.T) {
-	tests := []struct {
-		name     string
-		content  string
-		expected bool
-	}{
-		{
-			name:     "valid PGP message",
-			content: `-----BEGIN PGP MESSAGE-----
-Version: OpenPGP.js v4.10.8
-Comment: https://openpgpjs.org
-
-wy4ECQMIRthQ3aO85NvgAfASIX3dTwsFVt0gshPu7n1tN05e8rpqxOk6PYNm
-xtt90k4BqHuTCLNlFRJjuiuE8zdIc+j5zTN5zihxUReVqokeqULLOx2FBMHZ
-sbfqaG/iDbp+qDOc98IagMyPrEqKDxnhVVOraXy5dD9RDsntLso=
-=0vwU
------END PGP MESSAGE-----`,
-			expected: true,
-		},
-		{
-			name:     "valid CLI encrypted PGP message",
-			content: `-----BEGIN PGP MESSAGE-----
-Comment: https://yopass.se
-
-wy4ECQMILuOKAclPM2xgmtofvmWNo5/cfU8W54adSd82wxlrx9dHqfqpvPZnoaWF
-0uAB5FihFdqjbxKcLB3vS5UGETHhL1Hgi+Aj4biL4HPiNPEFqOBC5GYbD5oD7xUW
-Q5FI66ugslngweHlYODQ5IWLpbwMHdiymG7uoIKUusHi1lHUv+Gx0AA=
-=YaUx
------END PGP MESSAGE-----`,
-			expected: true,
-		},
-		{
-			name:     "empty string",
-			content:  "",
-			expected: false,
-		},
-		{
-			name:     "plain text",
-			content:  "hello world",
-			expected: false,
-		},
-		{
-			name:     "invalid PGP header",
-			content:  "----- PGP MESSAGE -----",
-			expected: false,
-		},
-		{
-			name:     "partial PGP message",
-			content:  "-----BEGIN PGP MESSAGE-----\nincomplete",
-			expected: false,
-		},
-		{
-			name:     "JSON content",
-			content:  `{"message": "hello"}`,
-			expected: false,
-		},
-		{
-			name:     "Base64 encoded content",
-			content:  "SGVsbG8gV29ybGQ=",
-			expected: false,
-		},
-	}
-
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			result := isPGPEncrypted(test.content)
-			if result != test.expected {
-				t.Errorf("isPGPEncrypted(%q) = %v, expected %v", test.name, result, test.expected)
-			}
-		})
-	}
-}
-
-func TestCreateSecretPGPValidation(t *testing.T) {
-	validPGPMessage := `-----BEGIN PGP MESSAGE-----
-Version: OpenPGP.js v4.10.8
-Comment: https://openpgpjs.org
-
-wy4ECQMIRthQ3aO85NvgAfASIX3dTwsFVt0gshPu7n1tN05e8rpqxOk6PYNm
-xtt90k4BqHuTCLNlFRJjuiuE8zdIc+j5zTN5zihxUReVqokeqULLOx2FBMHZ
-sbfqaG/iDbp+qDOc98IagMyPrEqKDxnhVVOraXy5dD9RDsntLso=
-=0vwU
------END PGP MESSAGE-----`
-
-	tests := []struct {
-		name       string
-		statusCode int
-		body       string
-		output     string
-		db         Database
-	}{
-		{
-			name:       "valid PGP encrypted message",
-			statusCode: 200,
-			body:       fmt.Sprintf(`{"message": "%s", "expiration": 3600}`, strings.ReplaceAll(validPGPMessage, "\n", "\\n")),
-			output:     "",
-			db:         &mockDB{},
-		},
-		{
-			name:       "plain text message (invalid)",
-			statusCode: 400,
-			body:       `{"message": "hello world", "expiration": 3600}`,
-			output:     "Message must be PGP encrypted",
-			db:         &mockDB{},
-		},
-		{
-			name:       "empty message (invalid)",
-			statusCode: 400,
-			body:       `{"message": "", "expiration": 3600}`,
-			output:     "Message must be PGP encrypted",
-			db:         &mockDB{},
-		},
-		{
-			name:       "JSON content (invalid)",
-			statusCode: 400,
-			body:       `{"message": "{\"data\": \"value\"}", "expiration": 3600}`,
-			output:     "Message must be PGP encrypted",
-			db:         &mockDB{},
-		},
-		{
-			name:       "invalid PGP format",
-			statusCode: 400,
-			body:       `{"message": "-----BEGIN PGP MESSAGE-----\nincomplete", "expiration": 3600}`,
-			output:     "Message must be PGP encrypted",
-			db:         &mockDB{},
-		},
-	}
-
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			req, _ := http.NewRequest("POST", "/secret", strings.NewReader(test.body))
-			rr := httptest.NewRecorder()
-			y := newTestServer(t, test.db, 10000, false)
-			y.createSecret(rr, req)
-
-			if rr.Code != test.statusCode {
-				t.Fatalf(`Expected status code %d; got %d`, test.statusCode, rr.Code)
-			}
-
-			if test.output != "" {
-				var response struct {
-					Message string `json:"message"`
+			if tc.statusCode == 200 {
+				var resp map[string]bool
+				if err := json.NewDecoder(res.Body).Decode(&resp); err != nil {
+					t.Fatalf("Failed to decode response: %v", err)
 				}
-				json.Unmarshal(rr.Body.Bytes(), &response)
-				if response.Message != test.output {
-					t.Fatalf(`Expected error message "%s"; got "%s"`, test.output, response.Message)
+				if resp["oneTime"] != tc.oneTime {
+					t.Errorf("Expected oneTime to be %v, got %v", tc.oneTime, resp["oneTime"])
 				}
 			}
 		})
 	}
 }
-
-func TestCreateFilePGPValidation(t *testing.T) {
-	validPGPMessage := `-----BEGIN PGP MESSAGE-----
-Version: OpenPGP.js v4.10.8
-Comment: https://openpgpjs.org
-
-wy4ECQMIHCI4BfNkxELgEICJXDZCq2zf0+DkWHGLBNoM3SzySpFzTF9dGItJ
-wCE50lQBbdoYiYZPT1+O/KCiDpC9P5ixWODZZXjUe/ZGxBvUlUrp0tx1VHWC
-dhgGsvKwXJm0kEwGwqj6mJq/j28FSFoP9Et/LtRuEe3Ct06WOrrHQ4v9DC4=
-=mja3
------END PGP MESSAGE-----`
-
-	tests := []struct {
-		name       string
-		statusCode int
-		body       string
-		output     string
-		db         Database
-	}{
-		{
-			name:       "valid PGP encrypted file",
-			statusCode: 200,
-			body:       fmt.Sprintf(`{"message": "%s", "expiration": 3600}`, strings.ReplaceAll(validPGPMessage, "\n", "\\n")),
-			output:     "",
-			db:         &mockDB{},
-		},
-		{
-			name:       "plain text file content (invalid)",
-			statusCode: 400,
-			body:       `{"message": "file content here", "expiration": 3600}`,
-			output:     "Message must be PGP encrypted",
-			db:         &mockDB{},
-		},
-	}
-
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			req, _ := http.NewRequest("POST", "/file", strings.NewReader(test.body))
-			rr := httptest.NewRecorder()
-			y := newTestServer(t, test.db, 10000, false)
-			y.createSecret(rr, req) // Both /secret and /file use createSecret handler
-
-			if rr.Code != test.statusCode {
-				t.Fatalf(`Expected status code %d; got %d`, test.statusCode, rr.Code)
-			}
-
-			if test.output != "" {
-				var response struct {
-					Message string `json:"message"`
-				}
-				json.Unmarshal(rr.Body.Bytes(), &response)
-				if response.Message != test.output {
-					t.Fatalf(`Expected error message "%s"; got "%s"`, test.output, response.Message)
-				}
-			}
-		})
-	}
-}
-

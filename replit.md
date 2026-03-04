@@ -6,7 +6,7 @@ Yopass is a secure secret sharing application. Users can encrypt and share secre
 
 - **Frontend**: React + Vite + TypeScript app in `website/` directory, running on port 5000
 - **Backend**: Go HTTP server in `cmd/yopass-server/`, running on port 1337
-- **Database**: Memcached (started automatically via `start.sh`)
+- **Database**: Redis (only storage backend)
 
 ## Project Structure
 
@@ -14,32 +14,46 @@ Yopass is a secure secret sharing application. Users can encrypt and share secre
 website/          - React/Vite frontend (TypeScript)
 cmd/
   yopass-server/  - Go backend server
-  yopass/         - CLI client
 pkg/
-  server/         - Server package (memcached, redis, http handlers)
+  server/         - Server package (redis, http handlers, logging)
   yopass/         - Core encryption/decryption logic
-start.sh          - Startup script (starts memcached, backend, frontend)
+start.sh          - Startup script (starts backend + frontend)
 ```
 
 ## Running the App
 
 The `start.sh` script:
-1. Starts memcached on `localhost:11211`
-2. Builds and starts the Go backend on `localhost:1337`
-3. Starts the Vite dev server on `0.0.0.0:5000`
+1. Builds and starts the Go backend on `localhost:1337`
+2. Starts the Vite dev server on `0.0.0.0:5000`
 
-The Vite server proxies API requests (`/secret/*` and `/file/*`) to the Go backend.
+The Vite server proxies API requests (`/secret/*`, `/file/*`, `/create/*`, `/config`) to the Go backend.
 
 ## Backend Configuration
 
 The Go backend supports flags/env vars:
-- `--database`: `memcached` (default) or `redis`
-- `--memcached`: memcached address (default: `localhost:11211`)
 - `--redis`: Redis URL (default: `redis://localhost:6379/0`)
 - `--port`: listen port (default: `1337`)
+- `--address`: listen address (default: `0.0.0.0`)
 - `--max-length`: max encrypted secret length (default: `10000`)
+- `--cors-allow-origin`: CORS origin (default: `*`)
+- `--force-onetime-secrets`: require one-time download
+- `--disable-upload`: disable file upload endpoints
+- `--prefetch-secret`: display one-time use info (default: `true`)
+- `--no-language-switcher`: disable language switcher in UI
+- `--trusted-proxies`: trusted proxy IPs/CIDRs for X-Forwarded-For
+- `--privacy-notice-url`: URL to privacy notice page
+- `--imprint-url`: URL to imprint/legal notice page
+
+## Refactoring Progress (Stage 1 Complete)
+
+Removed:
+- All non-English locales (only `en.json` remains; Armenian to be added later)
+- Memcached support (Redis is the only storage backend)
+- CLI client (`cmd/yopass/` and `pkg/yopass/client.go`)
+- Prometheus metrics (server, middleware, dependencies)
+- Built-in TLS support (TLS via Nginx reverse proxy only)
 
 ## Deployment
 
-Configured as a VM deployment (requires always-running memcached process).
-Run command: `bash /home/runner/workspace/start.sh`
+Will be migrated to self-hosted server with Docker + Nginx reverse proxy + TLS.
+Current Replit setup: `bash /home/runner/workspace/start.sh`
