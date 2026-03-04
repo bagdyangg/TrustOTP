@@ -13,7 +13,13 @@ export default defineConfig({
     },
   },
   server: {
-    port: 3000,
+    port: 5000,
+    host: '0.0.0.0',
+    allowedHosts: 'all',
+    proxy: {
+      '/secret': 'http://localhost:1337',
+      '/file': 'http://localhost:1337',
+    },
   },
   build: {
     rollupOptions: {
